@@ -11,10 +11,16 @@ import {
   Alert,
   SafeAreaView,
   Keyboard,
+  I18nManager,
+  ScrollView,
 } from 'react-native';
 import { MaterialIcons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import api from '../services/api';
+
+// Enable RTL for Hebrew support
+I18nManager.allowRTL(true);
+I18nManager.forceRTL(true);
 
 const HomeScreen = ({ navigation }) => {
   // State management
@@ -24,6 +30,7 @@ const HomeScreen = ({ navigation }) => {
   const [location, setLocation] = useState(null);
   const [radius, setRadius] = useState(5);
   const [loading, setLoading] = useState(false);
+  const [locationLoading, setLocationLoading] = useState(true);
   const [locationPermissionDenied, setLocationPermissionDenied] = useState(false);
 
   // Request location permission on mount
@@ -39,17 +46,19 @@ const HomeScreen = ({ navigation }) => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
         setLocationPermissionDenied(true);
+        setLocationLoading(false);
         Alert.alert(
-          'Location Permission',
-          'Location access is required to find nearby stores.',
-          [{ text: 'OK' }]
+          'הרשאת מיקום',
+          'נדרש גישה למיקום כדי למצוא חנויות קרובות.',
+          [{ text: 'אישור' }]
         );
         return;
       }
       getCurrentLocation();
     } catch (error) {
       console.error('Error requesting location permission:', error);
-      Alert.alert('Error', 'Failed to request location permission');
+      setLocationLoading(false);
+      Alert.alert('שגיאה', 'לא הצלח לבקש הרשאת מיקום');
     }
   };
 
@@ -58,7 +67,7 @@ const HomeScreen = ({ navigation }) => {
    */
   const getCurrentLocation = async () => {
     try {
-      setLoading(true);
+      setLocationLoading(true);
       const currentLocation = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
       });
@@ -68,9 +77,9 @@ const HomeScreen = ({ navigation }) => {
       });
     } catch (error) {
       console.error('Error getting location:', error);
-      Alert.alert('Error', 'Failed to get your location');
+      Alert.alert('שגיאה', 'לא הצלח לקבל את המיקום שלך');
     } finally {
-      setLoading(false);
+      setLocationLoading(false);
     }
   };
 
@@ -79,13 +88,13 @@ const HomeScreen = ({ navigation }) => {
    */
   const addProduct = () => {
     if (!inputValue.trim()) {
-      Alert.alert('Empty Product', 'Please enter a product name');
+      Alert.alert('מוצר ריק', 'אנא הזן שם מוצר');
       return;
     }
 
     const quantityNum = parseFloat(quantity) || 1;
     if (quantityNum <= 0) {
-      Alert.alert('Invalid Quantity', 'Quantity must be greater than 0');
+      Alert.alert('כמות לא תקינה', 'הכמות חייבת להיות גדולה מ-0');
       return;
     }
 
@@ -114,12 +123,12 @@ const HomeScreen = ({ navigation }) => {
    */
   const clearList = () => {
     Alert.alert(
-      'Clear List',
-      'Are you sure you want to clear all products?',
+      'מחק רשימה',
+      'האם אתה בטוח שברצונך למחוק את כל המוצרים?',
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: 'ביטול', style: 'cancel' },
         {
-          text: 'Clear',
+          text: 'מחק',
           style: 'destructive',
           onPress: () => setProducts([]),
         },
@@ -132,12 +141,12 @@ const HomeScreen = ({ navigation }) => {
    */
   const comparePrice = async () => {
     if (products.length === 0) {
-      Alert.alert('Empty List', 'Please add at least one product');
+      Alert.alert('רשימה ריקה', 'אנא הוסף לפחות מוצר אחד');
       return;
     }
 
     if (!location) {
-      Alert.alert('No Location', 'Please enable location to continue');
+      Alert.alert('אין מיקום', 'אנא הפעל מיקום כדי להמשיך');
       await requestLocationPermission();
       return;
     }
@@ -159,33 +168,39 @@ const HomeScreen = ({ navigation }) => {
           location,
         });
       } else {
-        Alert.alert('Error', response.error || 'Failed to compare prices');
+        Alert.alert('שגיאה', response.error || 'לא הצלח להשוות מחירים');
       }
     } catch (error) {
       console.error('Error comparing prices:', error);
-      Alert.alert('Error', 'Failed to compare prices. Please try again.');
+      Alert.alert('שגיאה', 'לא הצלח להשוות מחירים. אנא נסה שוב.');
     } finally {
       setLoading(false);
     }
   };
 
   /**
-   * Render shopping list item
+   * Render shopping list item as card
    */
   const renderProduct = ({ item }) => (
-    <View style={styles.productItem}>
-      <View style={styles.productInfo}>
-        <Text style={styles.productName}>{item.name}</Text>
-        <View style={styles.quantityBadge}>
-          <Text style={styles.quantityText}>Qty: {item.quantity}</Text>
+    <View style={styles.productCard}>
+      <View style={styles.cardContent}>
+        <View style={styles.productInfo}>
+          <View style={styles.productDetailsContainer}>
+            <Text style={styles.productName}>{item.name}</Text>
+            <View style={styles.quantityBadge}>
+              <MaterialIcons name="shopping-bag" size={12} color="#FFF" />
+              <Text style={styles.quantityText}>{item.quantity}</Text>
+            </View>
+          </View>
         </View>
+        <TouchableOpacity
+          style={styles.deleteButton}
+          onPress={() => removeProduct(item.id)}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
+          <MaterialCommunityIcons name="trash-can-outline" size={20} color="#E53935" />
+        </TouchableOpacity>
       </View>
-      <TouchableOpacity
-        style={styles.deleteButton}
-        onPress={() => removeProduct(item.id)}
-      >
-        <MaterialIcons name="close" size={20} color="#FF6B6B" />
-      </TouchableOpacity>
     </View>
   );
 
@@ -195,80 +210,98 @@ const HomeScreen = ({ navigation }) => {
 
       {/* Header */}
       <View style={styles.header}>
-        <View>
+        <View style={styles.headerTitleContainer}>
           <Text style={styles.title}>Grocer-E</Text>
-          <Text style={styles.subtitle}>Find Best Supermarket Deals</Text>
+          <Text style={styles.subtitle}>משווה מחירים לסופרמרקטים בישראל</Text>
         </View>
-        <MaterialCommunityIcons name="shopping-outline" size={28} color="#2196F3" />
+        <View style={styles.headerIcon}>
+          <MaterialCommunityIcons name="shopping-outline" size={32} color="#2E7D32" />
+        </View>
       </View>
 
-      {/* Location Status */}
-      {!locationPermissionDenied && location && (
-        <View style={styles.locationBanner}>
-          <MaterialIcons name="location-on" size={16} color="#4CAF50" />
-          <Text style={styles.locationText}>Location detected</Text>
-          <TouchableOpacity onPress={getCurrentLocation}>
-            <Text style={styles.refreshLocation}>Refresh</Text>
+      {/* Location Status Banner */}
+      {!locationPermissionDenied && location && !locationLoading && (
+        <View style={styles.locationBannerSuccess}>
+          <View style={styles.locationBannerContent}>
+            <MaterialIcons name="location-on" size={18} color="#FFF" />
+            <View style={styles.locationInfo}>
+              <Text style={styles.locationTitle}>המיקום שלך זוהה</Text>
+              <Text style={styles.locationCoords}>
+                {location.latitude.toFixed(4)}° , {location.longitude.toFixed(4)}°
+              </Text>
+            </View>
+          </View>
+          <TouchableOpacity onPress={getCurrentLocation} style={styles.refreshButton}>
+            <MaterialIcons name="refresh" size={16} color="#FFF" />
           </TouchableOpacity>
         </View>
       )}
 
+      {/* Location Loading */}
+      {locationLoading && (
+        <View style={styles.locationLoadingBanner}>
+          <ActivityIndicator size="small" color="#2E7D32" />
+          <Text style={styles.locationLoadingText}>מחפש מיקום...</Text>
+        </View>
+      )}
+
       {/* Location Permission Denied */}
-      {locationPermissionDenied && (
-        <View style={styles.warningBanner}>
-          <MaterialIcons name="warning" size={16} color="#FF6B6B" />
-          <Text style={styles.warningText}>Location access required</Text>
-          <TouchableOpacity onPress={requestLocationPermission}>
-            <Text style={styles.enableLocation}>Enable</Text>
+      {locationPermissionDenied && !locationLoading && (
+        <View style={styles.locationBannerWarning}>
+          <MaterialIcons name="warning" size={18} color="#FFF" />
+          <Text style={styles.warningText}>נדרשת הרשאת מיקום</Text>
+          <TouchableOpacity onPress={requestLocationPermission} style={styles.enableButton}>
+            <Text style={styles.enableButtonText}>הפעל</Text>
           </TouchableOpacity>
         </View>
       )}
 
       {/* Main Content */}
-      <View style={styles.content}>
+      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         {/* Product Input Section */}
         <View style={styles.inputSection}>
-          <Text style={styles.sectionTitle}>Add Products</Text>
+          <Text style={styles.sectionTitle}>הוסף מוצרים</Text>
 
           <View style={styles.inputContainer}>
-            <MaterialIcons name="local-grocery-store" size={20} color="#2196F3" />
             <TextInput
               style={styles.productInput}
-              placeholder="Product name (e.g., Milk, Bread)"
+              placeholder="שם מוצר (לחם, חלב, גבינה...)"
+              placeholderTextColor="#999"
               value={inputValue}
               onChangeText={setInputValue}
-              placeholderTextColor="#CCC"
               onSubmitEditing={addProduct}
             />
+            <MaterialCommunityIcons name="barcode" size={20} color="#2E7D32" />
           </View>
 
           <View style={styles.quantityRow}>
-            <View style={styles.quantityContainer}>
-              <Text style={styles.quantityLabel}>Quantity</Text>
-              <TextInput
-                style={styles.quantityInput}
-                placeholder="1"
-                value={quantity}
-                onChangeText={setQuantity}
-                keyboardType="decimal-pad"
-                placeholderTextColor="#CCC"
-              />
-            </View>
             <TouchableOpacity
-              style={styles.addButton}
+              style={[styles.addButton, loading && styles.addButtonDisabled]}
               onPress={addProduct}
               disabled={loading}
             >
-              <MaterialIcons name="add-circle" size={24} color="#FFF" />
-              <Text style={styles.addButtonText}>Add</Text>
+              <MaterialIcons name="add" size={24} color="#FFF" />
+              <Text style={styles.addButtonText}>הוסף</Text>
             </TouchableOpacity>
+
+            <View style={styles.quantityContainer}>
+              <Text style={styles.quantityLabel}>כמות</Text>
+              <TextInput
+                style={styles.quantityInput}
+                placeholder="1"
+                placeholderTextColor="#999"
+                value={quantity}
+                onChangeText={setQuantity}
+                keyboardType="decimal-pad"
+              />
+            </View>
           </View>
         </View>
 
         {/* Search Radius Selector */}
         <View style={styles.radiusSection}>
-          <Text style={styles.sectionTitle}>Search Radius</Text>
-          <View style={styles.radiusOptions}>
+          <Text style={styles.sectionTitle}>טווח חיפוש</Text>
+          <View style={styles.radiusGrid}>
             {[3, 5, 10, 20].map((r) => (
               <TouchableOpacity
                 key={r}
@@ -284,36 +317,33 @@ const HomeScreen = ({ navigation }) => {
                     radius === r && styles.radiusButtonTextActive,
                   ]}
                 >
-                  {r} km
+                  {r} ק״מ
                 </Text>
               </TouchableOpacity>
             ))}
           </View>
         </View>
 
-        {/* Shopping List */}
+        {/* Shopping List Section */}
         <View style={styles.listSection}>
           <View style={styles.listHeader}>
-            <Text style={styles.sectionTitle}>
-              Shopping List ({products.length})
-            </Text>
+            <View>
+              <Text style={styles.sectionTitle}>רשימת קניות</Text>
+              <Text style={styles.itemsCount}>{products.length} פריטים</Text>
+            </View>
             {products.length > 0 && (
-              <TouchableOpacity onPress={clearList}>
-                <Text style={styles.clearLink}>Clear</Text>
+              <TouchableOpacity onPress={clearList} style={styles.clearButton}>
+                <MaterialCommunityIcons name="trash-can-outline" size={20} color="#E53935" />
               </TouchableOpacity>
             )}
           </View>
 
           {products.length === 0 ? (
             <View style={styles.emptyState}>
-              <MaterialCommunityIcons
-                name="basket-outline"
-                size={48}
-                color="#DDD"
-              />
-              <Text style={styles.emptyText}>No products added yet</Text>
+              <MaterialCommunityIcons name="basket-outline" size={56} color="#DDD" />
+              <Text style={styles.emptyText}>עדיין לא הוספת מוצרים</Text>
               <Text style={styles.emptySubtext}>
-                Add products to start comparing prices
+                התחל בהוספת מוצרים כדי להשוות מחירים
               </Text>
             </View>
           ) : (
@@ -322,17 +352,21 @@ const HomeScreen = ({ navigation }) => {
               renderItem={renderProduct}
               keyExtractor={(item) => item.id.toString()}
               scrollEnabled={false}
-              ItemSeparatorComponent={() => <View style={styles.separator} />}
+              ItemSeparatorComponent={() => <View style={styles.cardSeparator} />}
+              contentContainerStyle={styles.listContent}
             />
           )}
         </View>
-      </View>
 
-      {/* Compare Button */}
+        {/* Spacing for footer button */}
+        {products.length > 0 && <View style={styles.footerSpacer} />}
+      </ScrollView>
+
+      {/* Compare Button Footer */}
       {products.length > 0 && (
         <View style={styles.footer}>
           <TouchableOpacity
-            style={styles.compareButton}
+            style={[styles.compareButton, loading && styles.compareButtonLoading]}
             onPress={comparePrice}
             disabled={loading}
           >
@@ -340,8 +374,8 @@ const HomeScreen = ({ navigation }) => {
               <ActivityIndicator size="small" color="#FFF" />
             ) : (
               <>
-                <MaterialIcons name="compare-arrows" size={20} color="#FFF" />
-                <Text style={styles.compareButtonText}>Compare Prices</Text>
+                <MaterialIcons name="compare-arrows" size={22} color="#FFF" />
+                <Text style={styles.compareButtonText}>השווה מחירים</Text>
               </>
             )}
           </TouchableOpacity>
@@ -354,107 +388,155 @@ const HomeScreen = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F5F5F5',
+    backgroundColor: '#F8F9F7',
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingVertical: 16,
+    paddingVertical: 12,
     backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#E0E0E0',
+    borderBottomWidth: 2,
+    borderBottomColor: '#E8F5E9',
+    marginBottom: 8,
+  },
+  headerTitleContainer: {
+    flex: 1,
   },
   title: {
-    fontSize: 24,
+    fontSize: 28,
     fontWeight: '700',
-    color: '#333',
+    color: '#2E7D32',
   },
   subtitle: {
     fontSize: 12,
-    color: '#999',
-    marginTop: 4,
-  },
-  locationBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#E8F5E9',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    margin: 10,
-    borderRadius: 8,
-  },
-  locationText: {
-    flex: 1,
-    fontSize: 12,
+    color: '#558B2F',
+    marginTop: 2,
     fontWeight: '500',
-    color: '#2E7D32',
-    marginLeft: 8,
   },
-  refreshLocation: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#2E7D32',
+  headerIcon: {
+    marginHorizontal: 12,
   },
-  warningBanner: {
+  locationBannerSuccess: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FFEBEE',
+    justifyContent: 'space-between',
+    backgroundColor: '#2E7D32',
     paddingHorizontal: 12,
     paddingVertical: 10,
-    margin: 10,
+    marginHorizontal: 12,
+    marginVertical: 8,
+    borderRadius: 10,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+  },
+  locationBannerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  locationInfo: {
+    marginHorizontal: 10,
+    flex: 1,
+  },
+  locationTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#FFF',
+  },
+  locationCoords: {
+    fontSize: 11,
+    color: '#C8E6C9',
+    marginTop: 2,
+  },
+  refreshButton: {
+    padding: 8,
+  },
+  locationLoadingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F8E9',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginHorizontal: 12,
+    marginVertical: 8,
     borderRadius: 8,
+  },
+  locationLoadingText: {
+    fontSize: 13,
+    color: '#558B2F',
+    fontWeight: '500',
+    marginHorizontal: 10,
+  },
+  locationBannerWarning: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#D32F2F',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginHorizontal: 12,
+    marginVertical: 8,
+    borderRadius: 10,
+    elevation: 3,
   },
   warningText: {
-    flex: 1,
-    fontSize: 12,
-    fontWeight: '500',
-    color: '#C62828',
-    marginLeft: 8,
-  },
-  enableLocation: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '600',
-    color: '#C62828',
+    color: '#FFF',
+    flex: 1,
+    marginHorizontal: 10,
+  },
+  enableButton: {
+    backgroundColor: '#FFF',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  enableButtonText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#D32F2F',
   },
   content: {
     flex: 1,
     paddingHorizontal: 12,
-    paddingTop: 12,
   },
   inputSection: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 14,
     marginBottom: 12,
+    marginTop: 8,
+    elevation: 2,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
     shadowRadius: 4,
-    elevation: 2,
   },
   sectionTitle: {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '700',
-    color: '#333',
-    marginBottom: 10,
+    color: '#1B5E20',
+    marginBottom: 12,
   },
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F5F5F5',
-    borderRadius: 8,
+    backgroundColor: '#F8F9F7',
+    borderRadius: 10,
     paddingHorizontal: 12,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#E0E0E0',
+    marginBottom: 12,
+    borderWidth: 1.5,
+    borderColor: '#E8F5E9',
   },
   productInput: {
     flex: 1,
     paddingVertical: 12,
     paddingHorizontal: 10,
-    fontSize: 14,
+    fontSize: 15,
     color: '#333',
   },
   quantityRow: {
@@ -466,95 +548,104 @@ const styles = StyleSheet.create({
   },
   quantityLabel: {
     fontSize: 11,
-    fontWeight: '600',
-    color: '#666',
-    marginBottom: 4,
+    fontWeight: '700',
+    color: '#558B2F',
+    marginBottom: 6,
     textTransform: 'uppercase',
   },
   quantityInput: {
-    backgroundColor: '#F5F5F5',
-    borderWidth: 1,
-    borderColor: '#E0E0E0',
-    borderRadius: 8,
+    backgroundColor: '#F8F9F7',
+    borderWidth: 1.5,
+    borderColor: '#E8F5E9',
+    borderRadius: 10,
     paddingHorizontal: 10,
     paddingVertical: 10,
-    fontSize: 14,
+    fontSize: 15,
     color: '#333',
   },
   addButton: {
-    backgroundColor: '#2196F3',
-    borderRadius: 8,
-    paddingHorizontal: 12,
+    backgroundColor: '#2E7D32',
+    borderRadius: 10,
+    paddingHorizontal: 14,
     paddingVertical: 10,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
     marginTop: 20,
+    elevation: 3,
+    shadowColor: '#2E7D32',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.25,
+  },
+  addButtonDisabled: {
+    opacity: 0.6,
   },
   addButtonText: {
     color: '#FFF',
-    fontWeight: '600',
-    fontSize: 14,
+    fontWeight: '700',
+    fontSize: 15,
   },
   radiusSection: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 14,
     marginBottom: 12,
+    elevation: 2,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
     shadowRadius: 4,
-    elevation: 2,
   },
-  radiusOptions: {
+  radiusGrid: {
     flexDirection: 'row',
     gap: 10,
   },
   radiusButton: {
     flex: 1,
-    paddingVertical: 10,
-    borderRadius: 8,
-    backgroundColor: '#F5F5F5',
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: '#F8F9F7',
     borderWidth: 2,
-    borderColor: '#E0E0E0',
+    borderColor: '#E8F5E9',
     alignItems: 'center',
   },
   radiusButtonActive: {
-    backgroundColor: '#2196F3',
-    borderColor: '#2196F3',
+    backgroundColor: '#2E7D32',
+    borderColor: '#2E7D32',
   },
   radiusButtonText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#666',
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#558B2F',
   },
   radiusButtonTextActive: {
     color: '#FFF',
   },
   listSection: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 14,
-    marginBottom: 120,
+    marginBottom: 12,
+    elevation: 2,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
     shadowRadius: 4,
-    elevation: 2,
-    flex: 1,
   },
   listHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 12,
   },
-  clearLink: {
+  itemsCount: {
     fontSize: 12,
-    fontWeight: '600',
-    color: '#FF6B6B',
+    color: '#999',
+    marginTop: 2,
+  },
+  clearButton: {
+    padding: 8,
   },
   emptyState: {
     alignItems: 'center',
@@ -562,51 +653,70 @@ const styles = StyleSheet.create({
     paddingVertical: 40,
   },
   emptyText: {
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: 15,
+    fontWeight: '700',
     color: '#999',
     marginTop: 12,
   },
   emptySubtext: {
-    fontSize: 12,
+    fontSize: 13,
     color: '#CCC',
-    marginTop: 4,
+    marginTop: 6,
   },
-  productItem: {
+  listContent: {
+    paddingVertical: 0,
+  },
+  productCard: {
+    backgroundColor: '#F8F9F7',
+    borderRadius: 12,
+    marginVertical: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderLeftWidth: 4,
+    borderLeftColor: '#2E7D32',
+  },
+  cardContent: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 10,
   },
   productInfo: {
     flex: 1,
+  },
+  productDetailsContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
   },
   productName: {
     fontSize: 14,
-    fontWeight: '500',
-    color: '#333',
+    fontWeight: '600',
+    color: '#1B5E20',
     flex: 1,
   },
   quantityBadge: {
-    backgroundColor: '#E3F2FD',
+    backgroundColor: '#2E7D32',
     borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
   quantityText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#1976D2',
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFF',
   },
   deleteButton: {
     padding: 8,
+    marginLeft: 8,
   },
-  separator: {
-    height: 1,
-    backgroundColor: '#F0F0F0',
+  cardSeparator: {
+    height: 0,
+  },
+  footerSpacer: {
+    height: 100,
   },
   footer: {
     position: 'absolute',
@@ -616,27 +726,34 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 12,
     backgroundColor: '#FFFFFF',
-    borderTopWidth: 1,
-    borderTopColor: '#E0E0E0',
+    borderTopWidth: 2,
+    borderTopColor: '#E8F5E9',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.12,
   },
   compareButton: {
-    backgroundColor: '#4CAF50',
-    borderRadius: 10,
+    backgroundColor: '#2E7D32',
+    borderRadius: 12,
     paddingVertical: 14,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 5,
-    elevation: 6,
+    elevation: 4,
+    shadowColor: '#2E7D32',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+  },
+  compareButtonLoading: {
+    opacity: 0.8,
   },
   compareButtonText: {
     color: '#FFF',
     fontWeight: '700',
-    fontSize: 15,
+    fontSize: 16,
   },
 });
 
