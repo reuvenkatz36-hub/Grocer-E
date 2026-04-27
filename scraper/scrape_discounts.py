@@ -47,7 +47,7 @@ CHAIN_SOURCES = [
 ]
 
 def get_db():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg.connect(DATABASE_URL)
 
 def fetch_xml(url):
     """Download and parse XML, handling gzip compression"""
