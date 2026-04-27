@@ -115,6 +115,8 @@ router.post('/compare', async (req, res) => {
       SELECT 
         pr.store_id,
         pd.name_hebrew AS product_name,
+        pd.unit_size,
+        pd.brand,
         pr.price_ils AS price
       FROM prices pr
       JOIN products pd ON pd.id = pr.product_id
@@ -140,6 +142,8 @@ router.post('/compare', async (req, res) => {
         if (!alreadyAdded) {
           pricesByStore[row.store_id].items.push({
             product_name: row.product_name,
+            unit_size: row.unit_size,
+            brand: row.brand,
             price: parseFloat(row.price)
           });
           pricesByStore[row.store_id].total_price += parseFloat(row.price);
