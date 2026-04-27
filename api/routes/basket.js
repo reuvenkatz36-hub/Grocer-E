@@ -90,15 +90,38 @@ router.post('/compare', async (req, res) => {
     const storeIds = nearbyStores.map(s => s.id);
     const searchNames = items.map(i => i.name);
 
-    // For each search term, find ONE single best matching product
+    // For each search term, prefer PACK products over single units
     const matchedProductIds = [];
     for (const searchName of searchNames) {
-      const match = await pool.query(`
-        SELECT id FROM products 
-        WHERE name_hebrew ILIKE $1 OR name_english ILIKE $1
-        ORDER BY LENGTH(name_hebrew) ASC
-        LIMIT 1
-      `, [`%${searchName}%`]);
+      const userWantsSpecificSize = /\d/.test(searchName) || 
+        searchName.includes('יחידה') || 
+        searchName.includes('בודד');
+      
+      let match;
+      if (userWantsSpecificSize) {
+        // User specified a size, match exactly
+        match = await pool.query(`
+          SELECT id FROM products 
+          WHERE name_hebrew ILIKE $1 OR name_english ILIKE $1
+          ORDER BY LENGTH(name_hebrew) ASC
+          LIMIT 1
+        `, [`%${searchName}%`]);
+      } else {
+        // Generic search - prefer PACK varieties (most common purchase)
+        match = await pool.query(`
+          SELECT id FROM products 
+          WHERE name_hebrew ILIKE $1 OR name_english ILIKE $1
+          ORDER BY 
+            CASE 
+              WHEN name_hebrew ILIKE '%מארז%' THEN 1
+              WHEN unit_size ILIKE '%x%' THEN 2
+              WHEN name_hebrew ILIKE '%יחידות%' THEN 3
+              ELSE 4
+            END,
+            LENGTH(name_hebrew) ASC
+          LIMIT 1
+        `, [`%${searchName}%`]);
+      }
       if (match.rows.length > 0) matchedProductIds.push(match.rows[0].id);
     }
 
