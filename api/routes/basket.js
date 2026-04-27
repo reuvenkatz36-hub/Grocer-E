@@ -210,5 +210,199 @@ router.post('/compare', async (req, res) => {
     res.status(500).json({ error: 'Failed to compare prices' });
   }
 });
+// Get shopping list
+router.get('/list/:userId', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM shopping_lists WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`,
+      [req.params.userId || 'guest']
+    );
+    if (result.rows.length === 0) {
+      return res.json({ items: [], name: 'הרשימה השבועית שלי' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch list' });
+  }
+});
+
+// Save shopping list
+router.post('/list/:userId', async (req, res) => {
+  try {
+    const { items, name } = req.body;
+    const userId = req.params.userId || 'guest';
+    
+    const existing = await pool.query(
+      `SELECT id FROM shopping_lists WHERE user_id = $1`,
+      [userId]
+    );
+
+    if (existing.rows.length > 0) {
+      await pool.query(
+        `UPDATE shopping_lists SET items = $1, updated_at = NOW() WHERE user_id = $2`,
+        [JSON.stringify(items), userId]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO shopping_lists (user_id, items, name) VALUES ($1, $2, $3)`,
+        [userId, JSON.stringify(items), name || 'הרשימה השבועית שלי']
+      );
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to save list' });
+  }
+});
+
+// SMART RECOMMENDATION - the killer feature
+router.post('/recommend/:userId', async (req, res) => {
+  try {
+    const { latitude, longitude, radius = 15 } = req.body;
+    const userLat = parseFloat(latitude) || 32.0853;
+    const userLon = parseFloat(longitude) || 34.7818;
+
+    const listResult = await pool.query(
+      `SELECT items FROM shopping_lists WHERE user_id = $1`,
+      [req.params.userId || 'guest']
+    );
+
+    if (listResult.rows.length === 0 || !listResult.rows[0].items.length) {
+      return res.json({ message: 'הרשימה ריקה', recommendation: null });
+    }
+
+    const items = listResult.rows[0].items;
+
+    const storesResult = await pool.query(
+      'SELECT id, chain_name, branch_name, latitude, longitude FROM stores WHERE is_active = true'
+    );
+
+    const nearbyStores = storesResult.rows
+      .map(store => ({
+        ...store,
+        distance: calculateDistance(userLat, userLon, store.latitude, store.longitude)
+      }))
+      .filter(store => store.distance <= radius)
+      .sort((a, b) => a.distance - b.distance);
+
+    const storeIds = nearbyStores.map(s => s.id);
+
+    // Match products
+    const matchedProductIds = [];
+    for (const item of items) {
+      const match = await pool.query(`
+        SELECT id FROM products 
+        WHERE name_hebrew ILIKE $1
+        ORDER BY 
+          CASE 
+            WHEN name_hebrew ILIKE '%מארז%' THEN 1
+            WHEN unit_size ILIKE '%x%' THEN 2
+            ELSE 3
+          END,
+          LENGTH(name_hebrew) ASC
+        LIMIT 1
+      `, [`%${item.name}%`]);
+      if (match.rows.length > 0) matchedProductIds.push(match.rows[0].id);
+    }
+
+    // Get prices
+    const pricesResult = await pool.query(`
+      SELECT pr.store_id, pd.name_hebrew, pr.price_ils, pd.id as product_id
+      FROM prices pr
+      JOIN products pd ON pd.id = pr.product_id
+      WHERE pr.store_id = ANY($1::int[])
+      AND pr.product_id = ANY($2::int[])
+    `, [storeIds, matchedProductIds]);
+
+    // Get active discounts
+    const discountsResult = await pool.query(`
+      SELECT d.store_id, d.product_id, d.description_hebrew, d.discount_amount, d.discount_type, s.chain_name
+      FROM discounts d
+      JOIN stores s ON s.id = d.store_id
+      WHERE d.is_active = true 
+      AND d.ends_at > NOW()
+      AND d.store_id = ANY($1::int[])
+    `, [storeIds]);
+
+    // Calculate per-store totals with discounts
+    const storeTotals = {};
+    nearbyStores.forEach(store => {
+      storeTotals[store.id] = {
+        ...store,
+        base_total: 0,
+        discount_total: 0,
+        items_found: 0,
+        applicable_discounts: [],
+        items: []
+      };
+    });
+
+    pricesResult.rows.forEach(row => {
+      if (storeTotals[row.store_id]) {
+        const seen = storeTotals[row.store_id].items.find(i => i.product_id === row.product_id);
+        if (!seen) {
+          storeTotals[row.store_id].items.push({
+            product_id: row.product_id,
+            name: row.name_hebrew,
+            price: parseFloat(row.price_ils)
+          });
+          storeTotals[row.store_id].base_total += parseFloat(row.price_ils);
+          storeTotals[row.store_id].items_found += 1;
+        }
+      }
+    });
+
+    // Apply discounts
+    const discountsByStore = {};
+    discountsResult.rows.forEach(d => {
+      if (!discountsByStore[d.store_id]) discountsByStore[d.store_id] = [];
+      discountsByStore[d.store_id].push(d);
+    });
+
+    Object.values(storeTotals).forEach(store => {
+      const storeDiscounts = discountsByStore[store.id] || [];
+      const itemProductIds = store.items.map(i => i.product_id);
+      
+      const applicable = storeDiscounts.filter(d => itemProductIds.includes(d.product_id));
+      const totalDiscount = applicable.reduce((sum, d) => sum + parseFloat(d.discount_amount), 0);
+      
+      store.applicable_discounts = applicable.map(d => ({
+        description: d.description_hebrew,
+        amount: parseFloat(d.discount_amount),
+        type: d.discount_type
+      }));
+      store.total_discount = totalDiscount;
+      store.final_total = parseFloat((store.base_total - totalDiscount).toFixed(2));
+      store.base_total = parseFloat(store.base_total.toFixed(2));
+      store.distance_km = parseFloat(store.distance.toFixed(1));
+    });
+
+    // Sort by FINAL price (after discounts)
+    const ranked = Object.values(storeTotals)
+      .filter(s => s.items_found > 0)
+      .sort((a, b) => a.final_total - b.final_total);
+
+    if (ranked.length === 0) {
+      return res.json({ message: 'לא נמצאו תוצאות', recommendation: null });
+    }
+
+    const winner = ranked[0];
+    const worst = ranked[ranked.length - 1];
+
+    res.json({
+      list_size: items.length,
+      items_matched: matchedProductIds.length,
+      best_store: winner,
+      total_savings: parseFloat((worst.final_total - winner.final_total).toFixed(2)),
+      all_stores: ranked,
+      week_summary: `השבוע, החנות הכי משתלמת לרשימה שלך היא ${winner.chain_name} - ${winner.branch_name}`
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to recommend' });
+  }
+});
 
 module.exports = router;
