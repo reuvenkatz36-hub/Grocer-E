@@ -61,7 +61,7 @@ router.get('/nearby', async (req, res) => {
 
 router.post('/compare', async (req, res) => {
   try {
-    const { items, latitude, longitude, radius = 10 } = req.body;
+    const { items, latitude, longitude, radius = 15 } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Items array is required' });
@@ -71,7 +71,6 @@ router.post('/compare', async (req, res) => {
     const userLon = parseFloat(longitude) || 34.7818;
     const searchRadius = parseFloat(radius);
 
-    // Get all stores
     const storesResult = await pool.query(
       'SELECT id, chain_name, branch_name, latitude, longitude FROM stores WHERE is_active = true'
     );
@@ -91,7 +90,27 @@ router.post('/compare', async (req, res) => {
     const storeIds = nearbyStores.map(s => s.id);
     const searchNames = items.map(i => i.name);
 
-    // Match by name_hebrew using ILIKE for fuzzy matching
+    // For each search term, find ONE single best matching product
+    const matchedProductIds = [];
+    for (const searchName of searchNames) {
+      const match = await pool.query(`
+        SELECT id FROM products 
+        WHERE name_hebrew ILIKE $1 OR name_english ILIKE $1
+        ORDER BY LENGTH(name_hebrew) ASC
+        LIMIT 1
+      `, [`%${searchName}%`]);
+      if (match.rows.length > 0) matchedProductIds.push(match.rows[0].id);
+    }
+
+    if (matchedProductIds.length === 0) {
+      return res.json({
+        stores_compared: 0,
+        items_searched: items.length,
+        potential_savings_nis: 0,
+        all_comparisons: []
+      });
+    }
+
     const pricesResult = await pool.query(`
       SELECT 
         pr.store_id,
@@ -100,14 +119,10 @@ router.post('/compare', async (req, res) => {
       FROM prices pr
       JOIN products pd ON pd.id = pr.product_id
       WHERE pr.store_id = ANY($1::int[])
-      AND (
-        pd.name_hebrew ILIKE ANY($2::text[])
-        OR pd.name_english ILIKE ANY($2::text[])
-      )
+      AND pr.product_id = ANY($2::int[])
       ORDER BY pr.recorded_at DESC
-    `, [storeIds, searchNames.map(n => `%${n}%`)]);
+    `, [storeIds, matchedProductIds]);
 
-    // Build results per store
     const pricesByStore = {};
     nearbyStores.forEach(store => {
       pricesByStore[store.id] = {
@@ -134,12 +149,22 @@ router.post('/compare', async (req, res) => {
     });
 
     const comparisons = Object.values(pricesByStore)
+      .filter(s => s.items_found > 0)
       .map(store => ({
         ...store,
         total_price: parseFloat(store.total_price.toFixed(2)),
         distance_km: parseFloat(store.distance.toFixed(1))
       }))
       .sort((a, b) => a.total_price - b.total_price);
+
+    if (comparisons.length === 0) {
+      return res.json({
+        stores_compared: 0,
+        items_searched: items.length,
+        potential_savings_nis: 0,
+        all_comparisons: []
+      });
+    }
 
     const cheapest = comparisons[0];
     const priciest = comparisons[comparisons.length - 1];
