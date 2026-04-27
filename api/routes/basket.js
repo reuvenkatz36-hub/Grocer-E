@@ -1,76 +1,96 @@
 const express = require('express');
-const { Pool } = require('pg');
 const router = express.Router();
+const { Pool } = require('pg');
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
 });
 
+// Distance calculator
 function calculateDistance(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-    Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
-    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const a = Math.sin(dLat/2) ** 2 +
+            Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
+            Math.sin(dLon/2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+// Detect if user wants a pack or single unit
+function isPackQuery(query) {
+  const packKeywords = ['מארז', 'מארז', 'pack', '6x', '12x', '24x', 'תבנית', 'שישייה'];
+  return packKeywords.some(kw => query.toLowerCase().includes(kw.toLowerCase()));
+}
+
+// Smart product matching - prefers single unit unless query asks for pack
+async function findBestProduct(query) {
+  const wantsPack = isPackQuery(query);
+  
+  const result = await pool.query(`
+    SELECT id, name_hebrew, unit_size, is_generic
+    FROM products 
+    WHERE name_hebrew ILIKE $1
+    ORDER BY 
+      CASE 
+        WHEN $2 = true THEN
+          CASE 
+            WHEN name_hebrew ILIKE '%מארז%' THEN 1
+            WHEN unit_size ILIKE '%x%' THEN 2
+            ELSE 3
+          END
+        ELSE
+          CASE 
+            WHEN name_hebrew ILIKE '%מארז%' THEN 4
+            WHEN unit_size ILIKE '%x%' THEN 3
+            WHEN unit_size IN ('1L', '500ml', '250ml', '100g', '200g', '250g', '500g', '1kg') THEN 1
+            ELSE 2
+          END
+      END,
+      LENGTH(name_hebrew) ASC
+    LIMIT 1
+  `, [`%${query}%`, wantsPack]);
+  
+  return result.rows[0] || null;
+}
+
+// GET all stores
 router.get('/supermarkets', async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT id, chain_name, branch_name, latitude, longitude FROM stores WHERE is_active = true ORDER BY chain_name'
-    );
+    const result = await pool.query('SELECT * FROM stores WHERE is_active = true');
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch supermarkets' });
+    res.status(500).json({ error: 'Failed to fetch stores' });
   }
 });
 
+// GET nearby stores
 router.get('/nearby', async (req, res) => {
   try {
-    const { latitude, longitude, radius = 10 } = req.query;
-    const userLat = parseFloat(latitude);
-    const userLon = parseFloat(longitude);
-    const searchRadius = parseFloat(radius);
-
-    const result = await pool.query(
-      'SELECT id, chain_name, branch_name, latitude, longitude FROM stores WHERE is_active = true'
-    );
-
-    const nearbyStores = result.rows
-      .map(store => ({
-        ...store,
-        distance: calculateDistance(userLat, userLon, store.latitude, store.longitude)
+    const { lat, lng, radius = 30 } = req.query;
+    const stores = await pool.query('SELECT * FROM stores WHERE is_active = true');
+    const nearby = stores.rows
+      .map(s => ({
+        ...s,
+        distance: calculateDistance(parseFloat(lat), parseFloat(lng), s.latitude, s.longitude)
       }))
-      .filter(store => store.distance <= searchRadius)
+      .filter(s => s.distance <= radius)
       .sort((a, b) => a.distance - b.distance);
-
-    res.json({
-      user_location: { latitude: userLat, longitude: userLon },
-      search_radius_km: searchRadius,
-      stores_found: nearbyStores.length,
-      stores: nearbyStores
-    });
+    res.json(nearby);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch nearby stores' });
+    res.status(500).json({ error: 'Failed' });
   }
 });
 
+// COMPARE basket - returns ONLY closest branch per chain
 router.post('/compare', async (req, res) => {
   try {
-    const { items, latitude, longitude, radius = 15 } = req.body;
-
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: 'Items array is required' });
-    }
-
+    const { items, latitude, longitude, radius = 30 } = req.body;
     const userLat = parseFloat(latitude) || 32.0853;
     const userLon = parseFloat(longitude) || 34.7818;
-    const searchRadius = parseFloat(radius);
 
+    // Get all stores within radius
     const storesResult = await pool.query(
       'SELECT id, chain_name, branch_name, latitude, longitude FROM stores WHERE is_active = true'
     );
@@ -80,136 +100,91 @@ router.post('/compare', async (req, res) => {
         ...store,
         distance: calculateDistance(userLat, userLon, store.latitude, store.longitude)
       }))
-      .filter(store => store.distance <= searchRadius)
+      .filter(store => store.distance <= radius)
       .sort((a, b) => a.distance - b.distance);
 
-    if (nearbyStores.length === 0) {
-      return res.status(404).json({ error: 'No stores found nearby' });
+    // CRITICAL: Keep only CLOSEST branch per chain
+    const seenChains = new Set();
+    const closestBranches = nearbyStores.filter(store => {
+      if (seenChains.has(store.chain_name)) return false;
+      seenChains.add(store.chain_name);
+      return true;
+    });
+
+    // Match each item to best product
+    const matchedProducts = [];
+    for (const item of items) {
+      const product = await findBestProduct(item.name);
+      if (product) matchedProducts.push({ ...product, query: item.name });
     }
 
-    const storeIds = nearbyStores.map(s => s.id);
-    const searchNames = items.map(i => i.name);
-
-    // For each search term, prefer PACK products over single units
-    const matchedProductIds = [];
-    for (const searchName of searchNames) {
-      const userWantsSpecificSize = /\d/.test(searchName) || 
-        searchName.includes('יחידה') || 
-        searchName.includes('בודד');
-      
-      let match;
-      if (userWantsSpecificSize) {
-        // User specified a size, match exactly
-        match = await pool.query(`
-          SELECT id FROM products 
-          WHERE name_hebrew ILIKE $1 OR name_english ILIKE $1
-          ORDER BY LENGTH(name_hebrew) ASC
-          LIMIT 1
-        `, [`%${searchName}%`]);
-      } else {
-        // Generic search - prefer PACK varieties (most common purchase)
-        match = await pool.query(`
-          SELECT id FROM products 
-          WHERE name_hebrew ILIKE $1 OR name_english ILIKE $1
-          ORDER BY 
-            CASE 
-              WHEN name_hebrew ILIKE '%מארז%' THEN 1
-              WHEN unit_size ILIKE '%x%' THEN 2
-              WHEN name_hebrew ILIKE '%יחידות%' THEN 3
-              ELSE 4
-            END,
-            LENGTH(name_hebrew) ASC
-          LIMIT 1
-        `, [`%${searchName}%`]);
-      }
-      if (match.rows.length > 0) matchedProductIds.push(match.rows[0].id);
+    if (matchedProducts.length === 0) {
+      return res.json({ message: 'לא נמצאו מוצרים', all_comparisons: [] });
     }
 
-    if (matchedProductIds.length === 0) {
-      return res.json({
-        stores_compared: 0,
-        items_searched: items.length,
-        potential_savings_nis: 0,
-        all_comparisons: []
-      });
-    }
+    const productIds = matchedProducts.map(p => p.id);
+    const storeIds = closestBranches.map(s => s.id);
 
+    // Get prices
     const pricesResult = await pool.query(`
-      SELECT 
-        pr.store_id,
-        pd.name_hebrew AS product_name,
-        pd.unit_size,
-        pd.brand,
-        pr.price_ils AS price
+      SELECT pr.store_id, pr.product_id, pr.price_ils, pd.name_hebrew, pd.unit_size
       FROM prices pr
       JOIN products pd ON pd.id = pr.product_id
       WHERE pr.store_id = ANY($1::int[])
       AND pr.product_id = ANY($2::int[])
-      ORDER BY pr.recorded_at DESC
-    `, [storeIds, matchedProductIds]);
+    `, [storeIds, productIds]);
 
-    const pricesByStore = {};
-    nearbyStores.forEach(store => {
-      pricesByStore[store.id] = {
+    // Build per-store totals
+    const storeData = {};
+    closestBranches.forEach(store => {
+      storeData[store.id] = {
         ...store,
-        items: [],
+        distance_km: parseFloat(store.distance.toFixed(1)),
         total_price: 0,
-        items_found: 0
+        items: []
       };
     });
 
     pricesResult.rows.forEach(row => {
-      if (pricesByStore[row.store_id]) {
-        const alreadyAdded = pricesByStore[row.store_id].items
-          .find(i => i.product_name === row.product_name);
-        if (!alreadyAdded) {
-          pricesByStore[row.store_id].items.push({
-            product_name: row.product_name,
+      if (storeData[row.store_id]) {
+        const exists = storeData[row.store_id].items.find(i => i.product_id === row.product_id);
+        if (!exists) {
+          storeData[row.store_id].items.push({
+            product_id: row.product_id,
+            product_name: row.name_hebrew,
             unit_size: row.unit_size,
-            brand: row.brand,
-            price: parseFloat(row.price)
+            price: parseFloat(row.price_ils)
           });
-          pricesByStore[row.store_id].total_price += parseFloat(row.price);
-          pricesByStore[row.store_id].items_found += 1;
+          storeData[row.store_id].total_price += parseFloat(row.price_ils);
         }
       }
     });
 
-    const comparisons = Object.values(pricesByStore)
-      .filter(s => s.items_found > 0)
-      .map(store => ({
-        ...store,
-        total_price: parseFloat(store.total_price.toFixed(2)),
-        distance_km: parseFloat(store.distance.toFixed(1))
-      }))
+    const ranked = Object.values(storeData)
+      .filter(s => s.items.length > 0)
+      .map(s => ({ ...s, total_price: parseFloat(s.total_price.toFixed(2)) }))
       .sort((a, b) => a.total_price - b.total_price);
 
-    if (comparisons.length === 0) {
-      return res.json({
-        stores_compared: 0,
-        items_searched: items.length,
-        potential_savings_nis: 0,
-        all_comparisons: []
-      });
+    if (ranked.length === 0) {
+      return res.json({ message: 'אין מחירים', all_comparisons: [] });
     }
 
-    const cheapest = comparisons[0];
-    const priciest = comparisons[comparisons.length - 1];
+    const cheapest = ranked[0];
+    const expensive = ranked[ranked.length - 1];
+    const savings = parseFloat((expensive.total_price - cheapest.total_price).toFixed(2));
 
     res.json({
-      stores_compared: comparisons.length,
-      items_searched: items.length,
+      potential_savings_nis: savings,
       cheapest_store: cheapest,
-      most_expensive_store: priciest,
-      potential_savings_nis: parseFloat((priciest.total_price - cheapest.total_price).toFixed(2)),
-      all_comparisons: comparisons
+      all_comparisons: ranked
     });
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Failed to compare prices' });
+    res.status(500).json({ error: 'Compare failed' });
   }
 });
+
 // Get shopping list
 router.get('/list/:userId', async (req, res) => {
   try {
@@ -222,8 +197,7 @@ router.get('/list/:userId', async (req, res) => {
     }
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch list' });
+    res.status(500).json({ error: 'Failed' });
   }
 });
 
@@ -251,15 +225,14 @@ router.post('/list/:userId', async (req, res) => {
     }
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to save list' });
+    res.status(500).json({ error: 'Failed' });
   }
 });
 
-// SMART RECOMMENDATION - the killer feature
+// SMART RECOMMENDATION
 router.post('/recommend/:userId', async (req, res) => {
   try {
-    const { latitude, longitude, radius = 15 } = req.body;
+    const { latitude, longitude, radius = 30 } = req.body;
     const userLat = parseFloat(latitude) || 32.0853;
     const userLon = parseFloat(longitude) || 34.7818;
 
@@ -278,6 +251,7 @@ router.post('/recommend/:userId', async (req, res) => {
       'SELECT id, chain_name, branch_name, latitude, longitude FROM stores WHERE is_active = true'
     );
 
+    // Filter by radius and pick closest branch per chain
     const nearbyStores = storesResult.rows
       .map(store => ({
         ...store,
@@ -286,24 +260,20 @@ router.post('/recommend/:userId', async (req, res) => {
       .filter(store => store.distance <= radius)
       .sort((a, b) => a.distance - b.distance);
 
-    const storeIds = nearbyStores.map(s => s.id);
+    const seenChains = new Set();
+    const closestBranches = nearbyStores.filter(store => {
+      if (seenChains.has(store.chain_name)) return false;
+      seenChains.add(store.chain_name);
+      return true;
+    });
 
-    // Match products
+    const storeIds = closestBranches.map(s => s.id);
+
+    // Match products with smart logic
     const matchedProductIds = [];
     for (const item of items) {
-      const match = await pool.query(`
-        SELECT id FROM products 
-        WHERE name_hebrew ILIKE $1
-        ORDER BY 
-          CASE 
-            WHEN name_hebrew ILIKE '%מארז%' THEN 1
-            WHEN unit_size ILIKE '%x%' THEN 2
-            ELSE 3
-          END,
-          LENGTH(name_hebrew) ASC
-        LIMIT 1
-      `, [`%${item.name}%`]);
-      if (match.rows.length > 0) matchedProductIds.push(match.rows[0].id);
+      const product = await findBestProduct(item.name);
+      if (product) matchedProductIds.push(product.id);
     }
 
     // Get prices
@@ -315,26 +285,24 @@ router.post('/recommend/:userId', async (req, res) => {
       AND pr.product_id = ANY($2::int[])
     `, [storeIds, matchedProductIds]);
 
-    // Get active discounts
+    // Active discounts
     const discountsResult = await pool.query(`
-      SELECT d.store_id, d.product_id, d.description_hebrew, d.discount_amount, d.discount_type, s.chain_name
+      SELECT d.store_id, d.product_id, d.description_hebrew, d.discount_amount, d.discount_type
       FROM discounts d
-      JOIN stores s ON s.id = d.store_id
       WHERE d.is_active = true 
       AND d.ends_at > NOW()
       AND d.store_id = ANY($1::int[])
     `, [storeIds]);
 
-    // Calculate per-store totals with discounts
     const storeTotals = {};
-    nearbyStores.forEach(store => {
+    closestBranches.forEach(store => {
       storeTotals[store.id] = {
         ...store,
         base_total: 0,
-        discount_total: 0,
         items_found: 0,
         applicable_discounts: [],
-        items: []
+        items: [],
+        distance_km: parseFloat(store.distance.toFixed(1))
       };
     });
 
@@ -353,7 +321,6 @@ router.post('/recommend/:userId', async (req, res) => {
       }
     });
 
-    // Apply discounts
     const discountsByStore = {};
     discountsResult.rows.forEach(d => {
       if (!discountsByStore[d.store_id]) discountsByStore[d.store_id] = [];
@@ -365,20 +332,28 @@ router.post('/recommend/:userId', async (req, res) => {
       const itemProductIds = store.items.map(i => i.product_id);
       
       const applicable = storeDiscounts.filter(d => itemProductIds.includes(d.product_id));
+      // Dedupe discount descriptions
+      const uniqueDiscounts = [];
+      const seenDescriptions = new Set();
+      applicable.forEach(d => {
+        if (!seenDescriptions.has(d.description_hebrew)) {
+          seenDescriptions.add(d.description_hebrew);
+          uniqueDiscounts.push(d);
+        }
+      });
+      
       const totalDiscount = applicable.reduce((sum, d) => sum + parseFloat(d.discount_amount), 0);
       
-      store.applicable_discounts = applicable.map(d => ({
+      store.applicable_discounts = uniqueDiscounts.map(d => ({
         description: d.description_hebrew,
         amount: parseFloat(d.discount_amount),
         type: d.discount_type
       }));
-      store.total_discount = totalDiscount;
+      store.total_discount = parseFloat(totalDiscount.toFixed(2));
       store.final_total = parseFloat((store.base_total - totalDiscount).toFixed(2));
       store.base_total = parseFloat(store.base_total.toFixed(2));
-      store.distance_km = parseFloat(store.distance.toFixed(1));
     });
 
-    // Sort by FINAL price (after discounts)
     const ranked = Object.values(storeTotals)
       .filter(s => s.items_found > 0)
       .sort((a, b) => a.final_total - b.final_total);
@@ -395,13 +370,12 @@ router.post('/recommend/:userId', async (req, res) => {
       items_matched: matchedProductIds.length,
       best_store: winner,
       total_savings: parseFloat((worst.final_total - winner.final_total).toFixed(2)),
-      all_stores: ranked,
-      week_summary: `השבוע, החנות הכי משתלמת לרשימה שלך היא ${winner.chain_name} - ${winner.branch_name}`
+      all_stores: ranked
     });
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Failed to recommend' });
+    res.status(500).json({ error: 'Failed' });
   }
 });
 
