@@ -1,6 +1,6 @@
 import os
 import requests
-import psycopg2
+import psycopg
 import gzip
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
